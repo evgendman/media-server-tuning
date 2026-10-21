@@ -14,7 +14,7 @@
 | Образ | `caronc/apprise:latest` |
 | Контейнер | `apprise` |
 | HTTP-порт контейнера | `8000` |
-| Адрес публикации на хосте | `127.0.0.1:8000` |
+| Адрес публикации на хосте | `<MINI-LAN-IP>:8000` — привязка только к LAN-интерфейсу, не ко всем интерфейсам |
 | Persistent config | `/opt/apprise-api/config` |
 | Вложения | `/opt/apprise-api/attach` |
 | Дополнительные плагины | `/opt/apprise-api/plugin` |
@@ -28,9 +28,11 @@
 
 ### Граница доступа
 
-Порт намеренно публикуется только на loopback-интерфейсе хоста. Так API и веб-интерфейс не становятся доступными всей локальной сети. Для начального локального развёртывания встроенная HTTP-аутентификация не включается; любой локальный процесс с доступом к `127.0.0.1:8000` сможет использовать API. Доступ к веб-интерфейсу с другого компьютера через SSH-туннель следует разрешать только доверенному SSH-пользователю.
+Веб-интерфейс и API публикуются на LAN-адресе самого MINI-Ubuntu (`<MINI-LAN-IP>:8000`), а не на `0.0.0.0:8000`: Docker слушает только выбранный интерфейс. Это позволяет домашним устройствам открывать `http://<MINI-LAN-IP>:8000/`, не публикуя порт на всех интерфейсах хоста.
 
-Для браузера на другом компьютере можно использовать SSH-туннель. Если впоследствии понадобится прямой доступ из Docker-контейнеров или других узлов, способ подключения нужно отдельно спроектировать и защитить; не следует просто менять привязку на `0.0.0.0:8000`.
+Так как интерфейс теперь доступен из LAN, включена встроенная HTTP-аутентификация Apprise API (`APPRISE_AUTH_REQUIRED=yes`) с отдельной административной учётной записью. Логин и случайно сгенерированный пароль хранятся только в `/opt/apprise-api/.env` с правами `0600` и не включаются в Git. Не отправлять содержимое этого файла в чат и не помещать пароль в публичную документацию.
+
+Basic Auth не шифрует трафик. Такой режим следует использовать только в доверенной домашней LAN; не настраивать перенаправление TCP/8000 на роутере из Интернета. Если потребуется доступ вне доверенной сети, сначала добавить HTTPS (reverse proxy/VPN) и сетевые ограничения.
 
 Токен Telegram и другие секреты нельзя добавлять в Git. Их следует вводить в веб-интерфейсе Apprise API на хосте; конфигурационный каталог содержит секретные данные и должен оставаться локальным.
 
@@ -68,6 +70,20 @@ sudo install -d -o 1000 -g 1000 -m 0750 \
   /opt/apprise-api/attach
 ```
 
+Создать локальный файл с учётными данными администратора, если он ещё не существует. Команда генерирует случайный пароль и защищает файл правами root-only; существующий файл не перезаписывать:
+
+```bash
+if sudo test -e /opt/apprise-api/.env; then
+  echo 'Файл .env уже существует; не перезаписываю его.'
+else
+  sudo sh -c 'umask 077; printf "APPRISE_USER=apprise-admin\\nAPPRISE_PASSWORD=%s\\n" "$(openssl rand -hex 24)" > /opt/apprise-api/.env'
+fi
+sudo chown root:root /opt/apprise-api/.env
+sudo chmod 0600 /opt/apprise-api/.env
+```
+
+Посмотреть пароль можно локально командой `sudo cat /opt/apprise-api/.env`, но не копировать вывод в чат или GitHub. Если `.env` уже был создан ранее, убедиться, что в нём присутствуют обе переменные `APPRISE_USER` и `APPRISE_PASSWORD`.
+
 Создать `/opt/apprise-api/docker-compose.yml`:
 
 ```yaml
@@ -78,12 +94,15 @@ services:
     restart: unless-stopped
     user: "1000:1000"
     ports:
-      - "127.0.0.1:8000:8000"
+      - "<MINI-LAN-IP>:8000:8000"
     environment:
       APPRISE_STATEFUL_MODE: simple
       APPRISE_WORKER_COUNT: "1"
       APPRISE_DEFAULT_FORMAT: "text"
       APPRISE_ADMIN: "yes"
+      APPRISE_AUTH_REQUIRED: "yes"
+      APPRISE_USER: "${APPRISE_USER:?Set APPRISE_USER in /opt/apprise-api/.env}"
+      APPRISE_PASSWORD: "${APPRISE_PASSWORD:?Set APPRISE_PASSWORD in /opt/apprise-api/.env}"
       TZ: Asia/Yekaterinburg
       HTTP_PROXY: "http://<MINI-LAN-IP>:8888"
       HTTPS_PROXY: "http://<MINI-LAN-IP>:8888"
@@ -99,7 +118,7 @@ services:
 
 При изменении системного часового пояса обновить параметр `TZ` и пересоздать контейнер.
 
-Перед запуском замените все четыре значения `http://<MINI-LAN-IP>:8888` локальным адресом действующего HTTP-прокси (в конфигурации MINI-Ubuntu — адрес самого мини-ПК и TCP/8888). Заполнитель `<MINI-LAN-IP>` предназначен только для этого публичного документа и не является готовым рабочим адресом. Используется `TZ: Asia/Yekaterinburg`, соответствующий часовому поясу MINI-Ubuntu. Установить ожидаемые права:
+Перед запуском замените `<MINI-LAN-IP>` в привязке порта фактическим LAN-адресом MINI-Ubuntu. В локальной конфигурации на дату установки это `192.168.0.14`; в публичной документации адрес намеренно скрыт. Также замените все четыре значения `http://<MINI-LAN-IP>:8888` локальным адресом существующего HTTP-прокси (TCP/8888). Значение прокси и `TZ: Asia/Yekaterinburg` уже установлены в живой конфигурации. Compose должен читать закрытый файл с учётными данными через `--env-file /opt/apprise-api/.env`.
 
 ```bash
 sudo chown 1000:1000 /opt/apprise-api/docker-compose.yml
@@ -111,10 +130,12 @@ sudo chmod 0640 /opt/apprise-api/docker-compose.yml
 ## 4. Загрузка и запуск
 
 ```bash
-sudo docker compose -f /opt/apprise-api/docker-compose.yml config
-sudo docker compose -f /opt/apprise-api/docker-compose.yml pull
-sudo docker compose -f /opt/apprise-api/docker-compose.yml up -d
+sudo docker compose --env-file /opt/apprise-api/.env -f /opt/apprise-api/docker-compose.yml config >/dev/null
+sudo docker compose --env-file /opt/apprise-api/.env -f /opt/apprise-api/docker-compose.yml pull
+sudo docker compose --env-file /opt/apprise-api/.env -f /opt/apprise-api/docker-compose.yml up -d
 ```
+
+Перенаправление вывода `config` в `/dev/null` намеренное: команда отображает развёрнутую конфигурацию, включая пароль в окружении контейнера.
 
 Проверить фактическое состояние и API health:
 
@@ -122,8 +143,8 @@ sudo docker compose -f /opt/apprise-api/docker-compose.yml up -d
 sudo docker ps --filter name=apprise
 sudo docker inspect -f 'Image={{.Config.Image}} ImageID={{.Image}} Status={{.State.Status}} RestartCount={{.RestartCount}}' apprise
 sudo docker logs --tail 80 apprise
-curl -sS -o /dev/null -w 'GET / -> HTTP %{http_code}\n' http://127.0.0.1:8000/
-curl -sS --max-time 15 -w '\nHTTP %{http_code}\n' http://127.0.0.1:8000/status
+curl -sS -o /dev/null -w 'GET / -> HTTP %{http_code}\n' http://<MINI-LAN-IP>:8000/
+curl -sS --max-time 15 -w '\nHTTP %{http_code}\n' http://<MINI-LAN-IP>:8000/status
 ```
 
 После изменения переменных proxy Compose должен пересоздать контейнер, чтобы они появились в окружении нового экземпляра. Проверить их внутри контейнера без вывода секретов:
@@ -135,17 +156,11 @@ sudo docker exec apprise python -c 'import os,urllib.request; print("HTTPS_PROXY
 
 ## 5. Открытие веб-интерфейса
 
-На самом MINI-Ubuntu открыть:
+С компьютера в домашней LAN открыть в браузере:
 
-`http://127.0.0.1:8000/`
+`http://<MINI-LAN-IP>:8000/`
 
-Если браузер запускается на другом компьютере, открыть SSH-туннель на этом компьютере (подставить фактический LAN-адрес мини-ПК):
-
-```bash
-ssh -N -L 8000:127.0.0.1:8000 dmitriev-ev@<MINI-LAN-IP>
-```
-
-Затем открыть на компьютере-клиенте `http://127.0.0.1:8000/`. Окно терминала с туннелем должно оставаться открытым.
+На MINI-Ubuntu фактический LAN-адрес на дату настройки — `192.168.0.14`; адрес скрыт в публичной документации. При запросе войти как `apprise-admin` с паролем из локального `/opt/apprise-api/.env`. Не использовать прежнюю инструкцию с `127.0.0.1:18000`: SSH-туннель нужен только как альтернативный способ доступа, когда LAN-доступ намеренно закрыт.
 
 В веб-интерфейсе создать конфигурацию с идентификатором, например, `arr-stack`, и добавить Telegram-адрес в формате, который определён в документации Apprise:
 
@@ -161,7 +176,7 @@ ssh -N -L 8000:127.0.0.1:8000 dmitriev-ev@<MINI-LAN-IP>
 curl -fsS -X POST \
   -H 'Content-Type: application/json' \
   -d '{"title":"MINI-Ubuntu: Apprise API","body":"Тестовая проверка доставки уведомлений.","type":"success"}' \
-  http://127.0.0.1:8000/notify/arr-stack
+  http://<MINI-LAN-IP>:8000/notify/arr-stack
 ```
 
 Проверить сообщение в Telegram и логи:
@@ -176,14 +191,14 @@ API-путь `/notify/{KEY}` принимает `body`, необязательн
 
 ```bash
 # Состояние
-sudo docker compose -f /opt/apprise-api/docker-compose.yml ps
+sudo docker compose --env-file /opt/apprise-api/.env -f /opt/apprise-api/docker-compose.yml ps
 
 # Логи
 sudo docker logs --tail 100 apprise
 
 # Обновить официальный образ и пересоздать контейнер
-sudo docker compose -f /opt/apprise-api/docker-compose.yml pull
-sudo docker compose -f /opt/apprise-api/docker-compose.yml up -d
+sudo docker compose --env-file /opt/apprise-api/.env -f /opt/apprise-api/docker-compose.yml pull
+sudo docker compose --env-file /opt/apprise-api/.env -f /opt/apprise-api/docker-compose.yml up -d
 
 # Остановить, не удаляя настройки
 sudo docker compose -f /opt/apprise-api/docker-compose.yml down
@@ -203,4 +218,5 @@ sudo docker compose -f /opt/apprise-api/docker-compose.yml down
 - 2026-10-21: предварительная проверка MINI-Ubuntu подтвердила Ubuntu 26.04.1 LTS, `Asia/Yekaterinburg`, Docker Engine `29.8.1`, Docker Compose `v5.5.1`; TCP/8000 был свободен, `/opt/apprise-api` отсутствовал.
 - 2026-10-21: официальный образ `caronc/apprise:latest` загружен и запущен. Проверено: `GET /` → HTTP 200; `GET /status` → тело `OK`, HTTP 200; контейнер `running`, `RestartCount=0`; ImageID `sha256:0b2913b15c8eb47c25345722985ffbfae701326edde21909c205d296d62dd52c`. В журнале есть успешный запуск Gunicorn, Nginx и prune-loop.
 - 2026-10-21: в Compose добавлены `HTTP_PROXY`, `HTTPS_PROXY` и их варианты в нижнем регистре, указывающие на существующий прокси MINI-Ubuntu по TCP/8888; для loopback задан `NO_PROXY`. Проверено внутри контейнера: окружение подхвачено, HTTPS-запрос к `https://api.telegram.org/` получил HTTP 200; `/status` после пересоздания контейнера вернул `OK`, HTTP 200. Конкретный LAN-адрес прокси не публикуется.
-- Следующий этап: создать и сохранить Telegram-конфигурацию Apprise, затем выполнить реальную тестовую доставку. До подтверждения появления сообщения в Telegram доставка не считается проверенной.
+- 2026-10-21: по запросу пользователя планируется прямой доступ из домашней LAN: публикация TCP/8000 только на LAN-IP мини-ПК вместо loopback. Поскольку веб-интерфейс становится сетевым, перед этим включается встроенная Basic Auth Apprise API; учётные данные должны храниться только в закрытом `/opt/apprise-api/.env`, не в Git. Изменение привязки и включение авторизации ещё ожидают применения и проверки на хосте.
+- Следующий этап после проверки LAN-доступа с аутентификацией: создать и сохранить Telegram-конфигурацию Apprise, затем выполнить реальную тестовую доставку.
