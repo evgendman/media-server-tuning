@@ -1,6 +1,6 @@
 # Apprise API на MINI-Ubuntu
 
-**Статус:** предварительная проверка хоста пройдена 2026-10-21; процедура развёртывания подготовлена, установка и проверка доставки ещё не выполнены. Не считать этот документ свидетельством уже установленного сервиса.  
+**Статус:** контейнер запущен 2026-10-21; `GET /` и `/status` ответили HTTP 200, состояние — `running`, `RestartCount=0`. Настройка исходящего HTTP-прокси и проверка доставки Telegram ещё ожидают выполнения.  
 **Проект разработчика:** https://github.com/caronc/apprise-api  
 **Способ установки:** официальный опубликованный Docker-образ `caronc/apprise:latest` с Docker Compose; сборка из исходников не требуется.  
 **Назначение:** единый локальный HTTP API для доставки уведомлений адаптеров, импортёров и заданий systemd в Telegram и другие поддерживаемые Apprise каналы.
@@ -23,6 +23,8 @@
 | UID:GID процесса | `1000:1000` — соответствует основному пользователю MINI-Ubuntu |
 | Автоперезапуск | `unless-stopped` |
 | Часовой пояс контейнера | `Asia/Yekaterinburg` — часовой пояс MINI-Ubuntu на предварительной проверке 2026-10-21 |
+| Proxy исходящих HTTP(S)-запросов | `http://<MINI-LAN-IP>:8888` — адрес показан как заполнитель, поскольку LAN-адреса не публикуются |
+| Proxy environment | `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy`; bypass для loopback через `NO_PROXY` / `no_proxy` |
 
 ### Граница доступа
 
@@ -31,6 +33,14 @@
 Для браузера на другом компьютере можно использовать SSH-туннель. Если впоследствии понадобится прямой доступ из Docker-контейнеров или других узлов, способ подключения нужно отдельно спроектировать и защитить; не следует просто менять привязку на `0.0.0.0:8000`.
 
 Токен Telegram и другие секреты нельзя добавлять в Git. Их следует вводить в веб-интерфейсе Apprise API на хосте; конфигурационный каталог содержит секретные данные и должен оставаться локальным.
+
+### Исходящий трафик через домашний HTTP-прокси
+
+Apprise должен отправлять внешние уведомления через уже существующий HTTP-прокси MINI-Ubuntu, иначе прямой выход к Telegram может быть заблокирован провайдером. Фактический адрес прокси хранится в локальном Compose-файле на хосте; в этом публичном репозитории он обозначен как `http://<MINI-LAN-IP>:8888`.
+
+Контейнеру задаются стандартные переменные `HTTP_PROXY` и `HTTPS_PROXY`, а также их варианты в нижнем регистре для совместимости с разными HTTP-клиентами. Значения для HTTPS используют схему `http://`, поскольку соединение TLS к целевому сайту создаётся через HTTP proxy. `NO_PROXY`/`no_proxy` исключают loopback-адреса. Python Requests поддерживает эти стандартные переменные окружения ([документация](https://requests.readthedocs.io/en/stable/user/advanced/#proxies)). Конкретный плагин уведомлений всё равно нужно проверить фактической отправкой тестового сообщения.
+
+Если адрес/порт существующего прокси изменится, обновить переменные в локальном Compose-файле и пересоздать контейнер. Не публиковать конкретный LAN-адрес или токены в этом репозитории.
 
 ## 2. Предварительная проверка хоста
 
@@ -75,6 +85,12 @@ services:
       APPRISE_DEFAULT_FORMAT: "text"
       APPRISE_ADMIN: "yes"
       TZ: Asia/Yekaterinburg
+      HTTP_PROXY: "http://<MINI-LAN-IP>:8888"
+      HTTPS_PROXY: "http://<MINI-LAN-IP>:8888"
+      http_proxy: "http://<MINI-LAN-IP>:8888"
+      https_proxy: "http://<MINI-LAN-IP>:8888"
+      NO_PROXY: "localhost,127.0.0.1,::1"
+      no_proxy: "localhost,127.0.0.1,::1"
     volumes:
       - ./config:/config
       - ./plugin:/plugin
@@ -83,7 +99,7 @@ services:
 
 При изменении системного часового пояса обновить параметр `TZ` и пересоздать контейнер.
 
-Файл можно создать редактором или безопасно записать через heredoc. Используется `TZ: Asia/Yekaterinburg`, соответствующий часовому поясу MINI-Ubuntu на предварительной проверке. Установить ожидаемые права:
+Перед запуском замените все шесть вхождений `http://<MINI-LAN-IP>:8888` локальным адресом действующего HTTP-прокси (в конфигурации MINI-Ubuntu — адрес самого мини-ПК и TCP/8888). Заполнитель `<MINI-LAN-IP>` предназначен только для этого публичного документа и не является готовым рабочим адресом. Используется `TZ: Asia/Yekaterinburg`, соответствующий часовому поясу MINI-Ubuntu. Установить ожидаемые права:
 
 ```bash
 sudo chown 1000:1000 /opt/apprise-api/docker-compose.yml
@@ -100,15 +116,21 @@ sudo docker compose -f /opt/apprise-api/docker-compose.yml pull
 sudo docker compose -f /opt/apprise-api/docker-compose.yml up -d
 ```
 
-Проверить фактическое состояние:
+Проверить фактическое состояние и API health:
 
 ```bash
 sudo docker ps --filter name=apprise
-sudo docker inspect -f 'Image={{.Config.Image}} Status={{.State.Status}} StartedAt={{.State.StartedAt}}' apprise
+sudo docker inspect -f 'Image={{.Config.Image}} ImageID={{.Image}} Status={{.State.Status}} RestartCount={{.RestartCount}}' apprise
 sudo docker logs --tail 80 apprise
-curl -sS -o /dev/null -w 'HTTP %{http_code}\n' http://127.0.0.1:8000/
+curl -sS -o /dev/null -w 'GET / -> HTTP %{http_code}\n' http://127.0.0.1:8000/
+curl -sS --max-time 15 -w '\nHTTP %{http_code}\n' http://127.0.0.1:8000/status
 ```
 
+После изменения переменных proxy Compose должен пересоздать контейнер, чтобы они появились в окружении нового экземпляра. Проверить их внутри контейнера без вывода секретов:
+
+```bash
+sudo docker exec apprise python -c 'import os,urllib.request; print("HTTPS_PROXY=" + os.environ.get("HTTPS_PROXY", "<unset>")); print("proxies=" + repr(urllib.request.getproxies()))'
+```
 При проверке зафиксировать фактическую версию образа/digest, состояние контейнера, HTTP-код и отсутствие ошибок инициализации. Успешный статус не отмечать до выполнения этих проверок.
 
 ## 5. Открытие веб-интерфейса
@@ -178,6 +200,6 @@ sudo docker compose -f /opt/apprise-api/docker-compose.yml down
 
 ## История развёртывания
 
-- 2026-10-21: проверено, что хост — `MINI-Ubuntu`, ОС сообщает `Ubuntu 26.04.1 LTS`, часовой пояс — `Asia/Yekaterinburg`, Docker Engine `29.8.1`, Docker Compose `v5.5.1`; порт TCP/8000 свободен, `/opt/apprise-api` отсутствует.
-- Процедура и исходная конфигурация подготовлены 2026-10-21.
-- Установка на хосте и успешная доставка тестового сообщения ещё не подтверждены. После реального развёртывания дополнить этот раздел фактическими данными: образом/digest, датой проверки, HTTP-кодом и результатом теста Telegram.
+- 2026-10-21: предварительная проверка MINI-Ubuntu подтвердила Ubuntu 26.04.1 LTS, `Asia/Yekaterinburg`, Docker Engine `29.8.1`, Docker Compose `v5.5.1`; TCP/8000 был свободен, `/opt/apprise-api` отсутствовал.
+- 2026-10-21: официальный образ `caronc/apprise:latest` загружен и запущен. Проверено: `GET /` → HTTP 200; `GET /status` → тело `OK`, HTTP 200; контейнер `running`, `RestartCount=0`; ImageID `sha256:0b2913b15c8eb47c25345722985ffbfae701326edde21909c205d296d62dd52c`. В журнале есть успешный запуск Gunicorn, Nginx и prune-loop.
+- Следующий этап: добавить env-переменные существующего HTTP-прокси и проверить HTTPS-запрос из контейнера через него; затем настроить Telegram и подтвердить тестовую доставку. На момент последней проверки исходящие уведомления ещё не тестировались.
