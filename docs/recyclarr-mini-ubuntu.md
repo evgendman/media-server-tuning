@@ -61,7 +61,7 @@ export RECYCLARR_DATA_DIR=/var/tmp/arr-quality-policy-runtime/data
 
 Именно каталоги `custom-formats/` содержат отдельные JSON-определения, которые подключаются к Recyclarr как локальные Resource Providers. YAML назначает оценки этим форматам в конкретном Quality Profile. JSON-каталоги Radarr и Sonarr имеют разные идентификаторы и не должны смешиваться.
 
-### Отчёты и резервная копия
+### Отчёты
 
 В `reports/` на момент проверки находились, в частности:
 - `policy-audit-2026-11-06.md` — аудит универсальной политики;
