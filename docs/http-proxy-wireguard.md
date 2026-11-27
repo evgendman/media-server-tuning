@@ -126,6 +126,25 @@ services:
 
 Gluetun — контейнерный VPN-клиент с собственным управлением маршрутизацией и firewall. В данном развёртывании он выполняет две связанные задачи: устанавливает WireGuard-туннель к VPS и предоставляет встроенный HTTP-прокси. Оба компонента находятся в одном сетевом окружении, поэтому правила firewall Gluetun ограничивают исходящие соединения прокси.
 
+### Сервисы, разделяющие network namespace Gluetun
+
+Помимо встроенного HTTP-прокси, в текущем Compose-проекте сетевое пространство Gluetun разделяет MTProto: сервис `mtproxy` (контейнер `mtproto-proxy`) использует `network_mode: "service:gluetun"`. Такой сервис не имеет независимого сетевого пространства: Docker привязывает его к сетевому namespace конкретного экземпляра контейнера Gluetun.
+
+**Важно при пересоздании Gluetun:** новый контейнер `proxy-gateway` получает новый ID. Уже созданный зависимый контейнер сохраняет ссылку на прежний ID. Обычный `docker restart mtproto-proxy` не меняет эту привязку и не устраняет ошибку вида `joining network namespace ... No such container`.
+
+После обновления или принудительного пересоздания Gluetun необходимо дождаться его состояния `healthy`, а затем пересоздать каждый сервис, который использует его namespace. Для текущей конфигурации это MTProxy:
+
+~~~bash
+sudo docker inspect proxy-gateway --format 'ID={{.Id}} Status={{.State.Status}} Health={{if .State.Health}}{{.State.Health.Status}}{{end}}'
+sudo docker compose -f /opt/proxy-gateway/compose.yaml up -d --no-deps --force-recreate mtproxy
+sudo docker inspect proxy-gateway --format 'ID={{.Id}}'
+sudo docker inspect mtproto-proxy --format 'Status={{.State.Status}} NetworkMode={{.HostConfig.NetworkMode}}'
+~~~
+
+В последней строке значение `NetworkMode=container:<ID>` должно содержать тот же ID, который вернула проверка `proxy-gateway`. Параметр `--no-deps` здесь используется после того, как Gluetun уже запущен и здоров: он не позволяет этой операции затронуть сам шлюз.
+
+Повседневный перезапуск MTProxy без пересоздания контейнера Gluetun остаётся обычным `docker restart mtproto-proxy`; пересоздавать MTProxy каждый день не требуется. При добавлении новых сервисов с `network_mode: "service:gluetun"` их нужно включать в перечень зависимых сервисов и пересоздавать после замены Gluetun.
+
 ### DNS
 
 DNS передан под управление Gluetun, а не оставлен настройкой из исходного WireGuard-профиля. В сводке запуска Gluetun были указаны внутренний DNS-адрес, DNS-forwarder и Cloudflare в качестве upstream resolver с типом DoT (DNS over TLS); DNS-кэширование включено, IPv6 в DNS-настройках Gluetun отключён.
@@ -361,6 +380,25 @@ The downloaded original profile was temporarily stored at **/tmp/proxy-gateway.c
 ### Gluetun in brief
 
 Gluetun is a containerized VPN client with routing and firewall management. In this deployment it performs two related tasks: it establishes the WireGuard tunnel to the VPS and provides the built-in HTTP proxy. Both components share one network namespace, allowing Gluetun's firewall to restrict the proxy's outbound connections.
+
+### Services sharing Gluetun's network namespace
+
+In addition to the built-in HTTP proxy, the current Compose project has an MTProto service that shares Gluetun's network namespace: service `mtproxy` (container `mtproto-proxy`) uses `network_mode: "service:gluetun"`. Such a service does not have an independent network namespace; Docker binds it to the namespace of a specific Gluetun container instance.
+
+**Important when recreating Gluetun:** the replacement `proxy-gateway` container receives a new ID. An already-created dependent container retains its reference to the previous ID. A plain `docker restart mtproto-proxy` does not update that reference and cannot fix an error such as `joining network namespace ... No such container`.
+
+After updating or force-recreating Gluetun, wait until it is `healthy`, then recreate every service that shares its namespace. For the current deployment, that is MTProxy:
+
+~~~bash
+sudo docker inspect proxy-gateway --format 'ID={{.Id}} Status={{.State.Status}} Health={{if .State.Health}}{{.State.Health.Status}}{{end}}'
+sudo docker compose -f /opt/proxy-gateway/compose.yaml up -d --no-deps --force-recreate mtproxy
+sudo docker inspect proxy-gateway --format 'ID={{.Id}}'
+sudo docker inspect mtproto-proxy --format 'Status={{.State.Status}} NetworkMode={{.HostConfig.NetworkMode}}'
+~~~
+
+In the final output, `NetworkMode=container:<ID>` must contain the same ID returned for `proxy-gateway`. Use `--no-deps` only after Gluetun is already running and healthy; this avoids changing the gateway as part of the dependent-service recovery.
+
+Routine MTProxy restarts while the Gluetun container itself has not been recreated should remain ordinary `docker restart mtproto-proxy` operations. Recreating MTProxy every day is unnecessary. Any future service using `network_mode: "service:gluetun"` must be added to the dependent-service list and recreated after Gluetun is replaced.
 
 ### DNS
 
