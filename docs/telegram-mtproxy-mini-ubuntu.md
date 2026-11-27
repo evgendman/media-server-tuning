@@ -1,7 +1,7 @@
 # Telegram MTProto Proxy on MINI-Ubuntu / Telegram MTProto-прокси на MINI-Ubuntu
 
-**Status / Статус:** installed; LAN client connection verified; media-transfer follow-up remains open / установлено; подключение клиента из LAN подтверждено; проверка передачи медиа остаётся открытой  
-**Last verified / Последняя проверка:** 2026-11-26  
+**Status / Статус:** installed; Telegram client operation verified; network-namespace recovery verified 2026-11-27; media-transfer follow-up remains open / установлено; работа Telegram-клиента подтверждена; восстановление сетевой привязки проверено 2026-11-27; проверка передачи медиа остаётся открытой  
+**Last verified / Последняя проверка:** 2026-11-27  
 **Purpose / Назначение:** document the MTProxy deployment, its integration with the existing Gluetun/WireGuard gateway, the daily restart timer, and operational checks without publishing real endpoints or credentials / описать развёртывание MTProxy, интеграцию с существующим шлюзом Gluetun/WireGuard, таймер ежедневного перезапуска и эксплуатационные проверки без публикации реальных адресов и секретов.
 
 > **Public-documentation safety / Безопасность публичной документации:** all host addresses, public endpoints, VPN client addresses, MTProxy secrets, WireGuard keys and other credentials are omitted. Placeholders such as \`MINI_LAN_IP\`, \`VPS_PUBLIC_ENDPOINT\`, \`WG_CLIENT_IP\`, \`VPS_EGRESS_IP\` and \`MTProxy_SECRET\` are pseudonyms, not literal values. Do not replace them with real values in this public file. / Все адреса узлов, публичные endpoint-адреса, адреса VPN-клиентов, секреты MTProxy, ключи WireGuard и другие учётные данные исключены. Обозначения-псевдонимы не являются реальными значениями и не должны заменяться фактическими данными в этом публичном файле.
@@ -145,6 +145,31 @@ services:
 
 Переменная Gluetun \`FIREWALL_INPUT_PORTS\` расширена с \`8888\` до \`8888,443\`, чтобы разрешить входящий порт MTProxy внутри сетевого пространства Gluetun. Остальные параметры VPN-клиента, WireGuard-профиль и его mount read-only сохранены.
 
+### Жизненный цикл Gluetun и MTProxy
+
+Сервис mtproxy использует Docker Compose `network_mode: "service:gluetun"`. Docker разрешает эту ссылку в сетевое пространство конкретного экземпляра контейнера Gluetun; в `docker inspect` фактическая привязка отображается как `NetworkMode=container:<GLUETUN_CONTAINER_ID>`.
+
+Если `proxy-gateway` пересоздан (например, после замены WireGuard-профиля), новый контейнер получает другой ID. Уже созданный MTProxy продолжает ссылаться на старый ID. Обычный `docker restart mtproto-proxy` не меняет эту привязку и не устраняет ошибку `joining network namespace ... No such container`.
+
+После пересоздания Gluetun:
+1. Убедиться, что `proxy-gateway` запущен и имеет состояние `healthy`.
+2. Пересоздать только зависимый сервис MTProxy:
+
+```bash
+sudo docker compose -f /opt/proxy-gateway/compose.yaml up -d --no-deps --force-recreate mtproxy
+```
+
+3. Проверить, что `NetworkMode=container:<ID>` у MTProxy содержит актуальный ID Gluetun:
+
+```bash
+sudo docker inspect proxy-gateway --format 'ID={{.Id}} Status={{.State.Status}} Health={{if .State.Health}}{{.State.Health.Status}}{{end}}'
+sudo docker inspect mtproto-proxy --format 'Status={{.State.Status}} NetworkMode={{.HostConfig.NetworkMode}}'
+```
+
+Команда с `--no-deps` применяется только после проверки здоровья Gluetun и не пересоздаёт сам шлюз. Если в будущем появятся другие сервисы с `network_mode: "service:gluetun"`, их также нужно пересоздавать после замены Gluetun.
+
+Повседневный перезапуск MTProxy при неизменном контейнере Gluetun остаётся обычным; принудительно пересоздавать MTProxy каждый день не нужно. Этот порядок восстановления был применён 2026-11-27 после пересоздания `proxy-gateway`; новый контейнер MTProxy получил актуальное сетевое пространство, а работа прокси была подтверждена в Telegram.
+
 ## 5. Секрет и параметры MTProxy
 
 Сохранён существующий MTProxy secret с VPS, чтобы не менять конфигурацию Telegram-клиентов. Сам секрет, его хеш, base64-представление, строка подключения и содержимое файлов с ключами в репозиторий не добавлялись.
@@ -228,6 +253,7 @@ sudo systemctl enable --now mtproto-proxy-restart.timer
 - если таймер включается уже после того, как \`OnBootSec=1h\` истёк в текущей загрузке, systemd может выполнить первый запуск сразу. Это наблюдалось при первоначальном включении таймера после установки.
 
 Служба выполняет только \`docker restart mtproto-proxy\`. Она не перезапускает \`proxy-gateway\`, HTTP proxy или WireGuard. Во время перезапуска MTProxy текущие клиентские сессии прерываются и должны переподключиться.
+Таймер намеренно выполняет обычный перезапуск, а не пересоздание контейнера: при неизменном Gluetun это правильно и не создаёт лишних контейнеров. Этот таймер **не исправляет** устаревшую сетевую привязку после пересоздания Gluetun; в таком случае требуется процедура из раздела «Жизненный цикл Gluetun и MTProxy» выше.
 
 Проверка таймера и журнала:
 
@@ -441,6 +467,31 @@ Ports are published on Gluetun because MTProxy shares its network namespace:
 
 Gluetun's \`FIREWALL_INPUT_PORTS\` was extended from \`8888\` to \`8888,443\` to permit incoming MTProxy traffic in the shared namespace. The existing VPN client settings, WireGuard profile and read-only profile mount were preserved.
 
+### Gluetun and MTProxy lifecycle
+
+The mtproxy service uses Docker Compose `network_mode: "service:gluetun"`. Docker resolves this reference to the network namespace of a specific Gluetun container instance; in `docker inspect` the effective binding appears as `NetworkMode=container:<GLUETUN_CONTAINER_ID>`.
+
+When `proxy-gateway` is recreated (for example, after replacing the WireGuard profile), the replacement receives a new ID. An existing MTProxy container continues to reference the old ID. A plain `docker restart mtproto-proxy` does not update that binding and cannot fix an error such as `joining network namespace ... No such container`.
+
+After recreating Gluetun:
+1. Confirm that `proxy-gateway` is running and `healthy`.
+2. Recreate only the dependent MTProxy service:
+
+```bash
+sudo docker compose -f /opt/proxy-gateway/compose.yaml up -d --no-deps --force-recreate mtproxy
+```
+
+3. Verify that MTProxy's `NetworkMode=container:<ID>` contains the current Gluetun container ID:
+
+```bash
+sudo docker inspect proxy-gateway --format 'ID={{.Id}} Status={{.State.Status}} Health={{if .State.Health}}{{.State.Health.Status}}{{end}}'
+sudo docker inspect mtproto-proxy --format 'Status={{.State.Status}} NetworkMode={{.HostConfig.NetworkMode}}'
+```
+
+Use `--no-deps` only after confirming Gluetun is healthy; this command does not recreate the gateway itself. If other services using `network_mode: "service:gluetun"` are added later, they must also be recreated after Gluetun is replaced.
+
+For routine maintenance, an ordinary MTProxy restart is sufficient while the Gluetun container remains unchanged. MTProxy does not need to be force-recreated every day. This recovery procedure was used on 2026-11-27 after `proxy-gateway` had been recreated; the replacement MTProxy container received the current network namespace and proxy operation was confirmed in Telegram.
+
 ## 5. MTProxy secret and runtime parameters
 
 The existing MTProxy secret from the VPS was retained so Telegram clients would not need to be reconfigured. The secret itself, its hash, base64 representation, connection URI and any key-file contents were not committed to the repository.
@@ -524,6 +575,7 @@ Schedule:
 - if the timer is enabled after \`OnBootSec=1h\` has already elapsed during the current boot, systemd may run the service immediately. This occurred when the timer was first enabled after installation.
 
 The service runs only \`docker restart mtproto-proxy\`. It does not restart \`proxy-gateway\`, the HTTP proxy or WireGuard. Existing Telegram client sessions are interrupted during the restart and must reconnect.
+The timer intentionally performs a normal restart rather than recreating the container: that is correct while Gluetun remains the same container and avoids unnecessary recreation. The timer **does not repair** a stale network-namespace reference after Gluetun is recreated; use the “Gluetun and MTProxy lifecycle” procedure above in that case.
 
 Inspect the timer and journal:
 
